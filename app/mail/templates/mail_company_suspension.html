@@ -1,0 +1,13 @@
+<html>
+  <body>
+    <p>
+      Your company <strong>{{ company_name }}</strong> was
+      <strong>{{ status }}</strong>.
+    </p>
+    {% if reason %}
+    <p>Reason: {{ reason }}</p>
+    {% endif %}
+    <p><a href="{{ profile_link }}">Company profile</a></p>
+    <p><a href="{{ home_link }}">Home</a></p>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Poppins', sans-serif;
+}
+
+::selection {
+  background-color: #FF0000;
+  
+  color: white;
+  
+}
+
+::-moz-selection {
+  background-color: #FF0000;
+  
+  color: white;
+  
+}
+
+.Vue-Toastification__toast--default.my-custom-toast-class {
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  width: 400px !important;
+  
+  height: 100px !important;
+  
+}

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SSE Client</title>
+</head>
+<body>
+    <h1>RabbitMQ messages via SSE:</h1>
+    <ul id="messages"></ul>
+
+    <script>
+        const queueName = "sanya";
+
+        const eventSource = new EventSource(`{{API_DOMAIN}}/rabbitmq-pub-sub/subscribe/stream?queue=${queueName}`);
+
+        eventSource.onmessage = function(event) {
+            const messagesList = document.getElementById('messages');
+            const newMessage = document.createElement('li');
+            newMessage.textContent = event.data;
+            messagesList.appendChild(newMessage);
+        };
+
+        eventSource.onerror = function(err) {
+            console.error("SSE error:", err);
+            eventSource.close();
+        };
+    </script>
+</body>
+</html>

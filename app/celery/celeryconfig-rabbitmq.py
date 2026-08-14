@@ -1,0 +1,19 @@
+from app.config import settings
+
+broker_url = settings.RABBITMQ_URL_BROKER
+result_backend = (
+    settings.RABBITMQ_URL_RESULT
+)  # Can use `rpc://` to get results
+redbeat_redis_url = settings.REDIS_URL_CELERY_REDBEAT
+
+beat_scheduler = (
+    "redbeat.RedBeatScheduler"
+)
+
+task_serializer = "json"
+accept_content = ["json"]
+result_expires = 3600  # Task result storage duration (1 hour)
+timezone = "UTC"
+enable_utc = True
+
+broker_connection_retry_on_startup = True  # Reconnect to broker on startup

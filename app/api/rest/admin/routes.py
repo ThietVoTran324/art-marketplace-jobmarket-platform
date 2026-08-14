@@ -1,0 +1,317 @@
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, desc, func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.rest.audit import (
+    ACTION_ADMIN_DELETE_COMMENT,
+    ACTION_ADMIN_DELETE_PIN,
+    ACTION_COPYRIGHT_REPORT_DISMISS,
+    ACTION_COPYRIGHT_REPORT_RESOLVE,
+    ACTION_ROLE_ASSIGN,
+    ACTION_ROLE_REVOKE,
+    TARGET_COMMENT,
+    TARGET_COPYRIGHT_REPORT,
+    TARGET_PIN,
+    TARGET_USER,
+    AuditLogOut,
+    write_audit,
+)
+from app.api.rest.dependencies import db, require_roles
+from app.api.rest.marketplace.schemas import (
+    CopyrightReportAdminPatchIn,
+    CopyrightReportOut,
+)
+from app.api.rest.roles import assign_role, revoke_role
+from app.postgresql.models import (
+    AuditLogOrm,
+    CommentsOrm,
+    CompanyVerificationRequestsOrm,
+    CopyrightReportsOrm,
+    JobPostReportsOrm,
+    PinListingsOrm,
+    PinsOrm,
+    UsersOrm,
+    WorkExperiencesOrm,
+)
+
+router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+class RoleAssignIn(BaseModel):
+    role: str = Field(..., min_length=1, max_length=50)
+
+
+class AdminOverviewOut(BaseModel):
+    audit_events_24h: int
+    open_copyright_reports: int
+    open_job_reports: int
+    open_kyc_requests: int
+    open_work_exp_pending: int
+
+
+async def _require_other_user(
+    db: AsyncSession, admin_user_id: int, target_user_id: int
+) -> UsersOrm:
+    if admin_user_id == target_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="cannot modify your own roles",
+        )
+
+    target = await db.scalar(select(UsersOrm).where(UsersOrm.id == target_user_id))
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
+    return target
+
+
+@router.get("/overview", response_model=AdminOverviewOut)
+async def admin_overview(
+    db: db,
+    _: int = Depends(require_roles("admin")),
+):
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    audit_events_24h = await db.scalar(
+        select(func.count())
+        .select_from(AuditLogOrm)
+        .where(AuditLogOrm.created_at >= since)
+    )
+    open_copyright_reports = await db.scalar(
+        select(func.count())
+        .select_from(CopyrightReportsOrm)
+        .where(CopyrightReportsOrm.status == "open")
+    )
+    open_job_reports = await db.scalar(
+        select(func.count())
+        .select_from(JobPostReportsOrm)
+        .where(JobPostReportsOrm.status == "open")
+    )
+    open_kyc_requests = await db.scalar(
+        select(func.count())
+        .select_from(CompanyVerificationRequestsOrm)
+        .where(
+            CompanyVerificationRequestsOrm.status.in_(("pending", "need_more_info"))
+        )
+    )
+    open_work_exp_pending = await db.scalar(
+        select(func.count())
+        .select_from(WorkExperiencesOrm)
+        .where(WorkExperiencesOrm.status == "pending")
+    )
+    return AdminOverviewOut(
+        audit_events_24h=int(audit_events_24h or 0),
+        open_copyright_reports=int(open_copyright_reports or 0),
+        open_job_reports=int(open_job_reports or 0),
+        open_kyc_requests=int(open_kyc_requests or 0),
+        open_work_exp_pending=int(open_work_exp_pending or 0),
+    )
+
+
+@router.delete("/pin/{pin_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_delete_pin(
+    pin_id: int,
+    db: db,
+    admin_user_id: int = Depends(require_roles("admin")),
+):
+    pin = await db.scalar(select(PinsOrm).where(PinsOrm.id == pin_id))
+    if pin is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="pin not found")
+
+    owner_user_id = pin.user_id
+
+    await db.execute(delete(PinsOrm).where(PinsOrm.id == pin_id))
+    await write_audit(
+        db,
+        actor_user_id=admin_user_id,
+        action=ACTION_ADMIN_DELETE_PIN,
+        target_type=TARGET_PIN,
+        target_id=pin_id,
+        metadata={"owner_user_id": owner_user_id},
+    )
+    await db.commit()
+
+
+@router.delete("/comment/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_delete_copmment(
+    comment_id: int,
+    db: db,
+    admin_user_id: int = Depends(require_roles("admin")),
+):
+    comment = await db.scalar(select(CommentsOrm).where(CommentsOrm.id == comment_id))
+    if comment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="comment not found")
+
+    owner_user_id = comment.user_id
+
+    await db.execute(delete(CommentsOrm).where(CommentsOrm.id == comment_id))
+    await write_audit(
+        db,
+        actor_user_id=admin_user_id,
+        action=ACTION_ADMIN_DELETE_COMMENT,
+        target_type=TARGET_COMMENT,
+        target_id=comment_id,
+        metadata={"owner_user_id": owner_user_id},
+    )
+    await db.commit()
+
+
+@router.post("/users/{target_user_id}/roles", status_code=status.HTTP_200_OK)
+async def admin_assign_role(
+    target_user_id: int,
+    body: RoleAssignIn,
+    db: db,
+    admin_user_id: int = Depends(require_roles("admin")),
+):
+    await _require_other_user(db, admin_user_id, target_user_id)
+
+    roles = await assign_role(db, target_user_id, body.role)
+    await write_audit(
+        db,
+        actor_user_id=admin_user_id,
+        action=ACTION_ROLE_ASSIGN,
+        target_type=TARGET_USER,
+        target_id=target_user_id,
+        metadata={"role": body.role},
+    )
+    await db.commit()
+    return {"user_id": target_user_id, "roles": sorted(roles)}
+
+
+@router.delete("/users/{target_user_id}/roles/{role}", status_code=status.HTTP_200_OK)
+async def admin_revoke_role(
+    target_user_id: int,
+    role: str,
+    db: db,
+    admin_user_id: int = Depends(require_roles("admin")),
+):
+    await _require_other_user(db, admin_user_id, target_user_id)
+
+    roles = await revoke_role(db, target_user_id, role)
+    await write_audit(
+        db,
+        actor_user_id=admin_user_id,
+        action=ACTION_ROLE_REVOKE,
+        target_type=TARGET_USER,
+        target_id=target_user_id,
+        metadata={"role": role},
+    )
+    await db.commit()
+    return {"user_id": target_user_id, "roles": sorted(roles)}
+
+
+@router.get("/audit", response_model=list[AuditLogOut])
+async def admin_list_audit(
+    db: db,
+    _: int = Depends(require_roles("admin")),
+    actor_user_id: int | None = None,
+    action: str | None = None,
+    target_type: str | None = None,
+    target_id: int | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    query = select(AuditLogOrm)
+
+    if actor_user_id is not None:
+        query = query.where(AuditLogOrm.actor_user_id == actor_user_id)
+    if action is not None:
+        query = query.where(AuditLogOrm.action == action)
+    if target_type is not None:
+        query = query.where(AuditLogOrm.target_type == target_type)
+    if target_id is not None:
+        query = query.where(AuditLogOrm.target_id == target_id)
+    if date_from is not None:
+        query = query.where(AuditLogOrm.created_at >= date_from)
+    if date_to is not None:
+        query = query.where(AuditLogOrm.created_at <= date_to)
+
+    rows = await db.scalars(
+        query.order_by(desc(AuditLogOrm.created_at), desc(AuditLogOrm.id))
+        .offset(offset)
+        .limit(limit)
+    )
+
+    return rows.all()
+
+
+@router.get("/copyright-reports", response_model=list[CopyrightReportOut])
+async def admin_list_copyright_reports(
+    db: db,
+    _: int = Depends(require_roles("admin")),
+    status_filter: str | None = Query(default=None, alias="status"),
+    pin_id: int | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    query = select(CopyrightReportsOrm)
+    if status_filter:
+        query = query.where(CopyrightReportsOrm.status == status_filter)
+    if pin_id is not None:
+        query = query.where(CopyrightReportsOrm.pin_id == pin_id)
+    rows = await db.scalars(
+        query.order_by(desc(CopyrightReportsOrm.id)).offset(offset).limit(limit)
+    )
+    return list(rows.all())
+
+
+@router.patch("/copyright-reports/{report_id}", response_model=CopyrightReportOut)
+async def admin_patch_copyright_report(
+    report_id: int,
+    body: CopyrightReportAdminPatchIn,
+    db: db,
+    admin_user_id: int = Depends(require_roles("admin")),
+):
+    row = await db.get(CopyrightReportsOrm, report_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="report_not_found")
+    if row.status != "open":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=f"report_{row.status}"
+        )
+
+    now = datetime.now(timezone.utc)
+    unlisted_count = 0
+    if body.status == "resolved":
+        result = await db.execute(
+            update(PinListingsOrm)
+            .where(
+                PinListingsOrm.pin_id == row.pin_id,
+                PinListingsOrm.status == "listed",
+            )
+            .values(status="unlisted", updated_at=now)
+        )
+        unlisted_count = int(result.rowcount or 0)
+
+    row = await db.scalar(
+        update(CopyrightReportsOrm)
+        .where(CopyrightReportsOrm.id == report_id)
+        .values(
+            status=body.status,
+            admin_note=body.admin_note,
+            resolved_by_user_id=admin_user_id,
+            updated_at=now,
+        )
+        .returning(CopyrightReportsOrm)
+    )
+    action = (
+        ACTION_COPYRIGHT_REPORT_RESOLVE
+        if body.status == "resolved"
+        else ACTION_COPYRIGHT_REPORT_DISMISS
+    )
+    meta = {"pin_id": row.pin_id, "status": body.status}
+    if body.status == "resolved":
+        meta["unlisted_count"] = unlisted_count
+    await write_audit(
+        db,
+        actor_user_id=admin_user_id,
+        action=action,
+        target_type=TARGET_COPYRIGHT_REPORT,
+        target_id=report_id,
+        metadata=meta,
+    )
+    await db.commit()
+    return row

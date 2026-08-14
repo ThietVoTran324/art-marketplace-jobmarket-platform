@@ -1,0 +1,73 @@
+# Local live-reload overlay (no image rebuild for code edits)
+# Usage:
+#   docker network create pinterest-network
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# Frontend HMR: http://localhost:3000  (also :80)
+# Mailhog UI:   http://localhost:8025
+# API direct:   http://localhost:8000/health
+# PgAdmin:      http://localhost:5050
+
+services:
+  fastapi-app:
+    volumes: !override
+      - .:/fastapi
+      - ./media:/fastapi/media
+      - ./logs:/logs
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /fastapi/app
+
+  celery-worker:
+    volumes: !override
+      - .:/fastapi
+      - ./media:/fastapi/media
+      - ./logs:/logs
+    command: >
+      watchfiles --filter python
+      "celery -A app.celery.celery_app.celery_instance worker --loglevel=info"
+      /fastapi/app
+
+  celery-beat:
+    volumes: !override
+      - .:/fastapi
+      - ./media:/fastapi/media
+      - ./logs:/logs
+    command: >
+      watchfiles --filter python
+      "celery -A app.celery.celery_app.celery_instance beat --loglevel=info"
+      /fastapi/app
+
+  # Vite HMR instead of baked nginx image
+  vuejs:
+    build: !reset
+    image: node:18
+    working_dir: /vuejs
+    volumes: !override
+      - ./vuejs:/vuejs
+      - vuejs_node_modules:/vuejs/node_modules
+    ports: !override
+      - "3000:3000"
+      - "80:3000"
+    environment:
+      VITE_API_PROXY: http://fastapi-container:8000
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
+    depends_on:
+      - fastapi-app
+    networks:
+      - pinterest-network
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - pinterest-network
+
+volumes:
+  vuejs_node_modules:
